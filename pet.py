@@ -41,6 +41,7 @@ BUBBLE_DURATION = 3       # seconds a speech bubble stays up
 BUBBLE_EVERY = 8          # default seconds between idle speech bubbles
 FLY_AMP = 40.0            # vertical bob amplitude for flyers (px)
 FLY_FREQ = 0.05           # bob speed (radians per tick)
+INTERP = 4                # cross-fade sub-steps between base frames (4*4=16)
 
 LOCK_PATH = "/tmp/pixel_pet.lock"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,16 +51,16 @@ SPRITE_DIR = os.path.join(BASE_DIR, "sprite_sheet")
 # animation tick (lower = faster), and its own speech lines.
 PETS = [
     {"name": "cat", "sheet": "cat.png", "kind": "walk", "size": 86,
-     "speed": 2.0, "anim": 6,
+     "speed": 2.0, "anim": 2,
      "msgs": ["~meow meow", "nya~", "zoomies!!", "where my fish"]},
     {"name": "persian", "sheet": "persian.png", "kind": "walk", "size": 86,
-     "speed": 1.5, "anim": 7,
+     "speed": 1.5, "anim": 2,
      "msgs": ["mrrp~", "so fluffy", "pet me?", "(=^･ω･^=)"]},
     {"name": "corgi", "sheet": "corgi.png", "kind": "walk", "size": 92,
-     "speed": 2.6, "anim": 6,
+     "speed": 2.6, "anim": 2,
      "msgs": ["woof!", "borf borf", "such speed", "wiggle~"]},
     {"name": "totoro", "sheet": "totoro.png", "kind": "walk", "size": 120,
-     "speed": 1.3, "anim": 9,
+     "speed": 1.3, "anim": 3,
      "msgs": ["totoro~", "*rumble*", "...", "🌳"]},
 ]
 
@@ -86,19 +87,32 @@ def _pil_to_nsimage(pil_img):
     return NSImage.alloc().initWithData_(data)
 
 
-def load_frames(path, count=4, flip=False):
-    """Slice a horizontal sprite sheet into `count` NSImage frames."""
+def load_frames(path, count=4, flip=False, interp=INTERP):
+    """Slice a sprite sheet into `count` base frames, then cross-fade
+    `interp` sub-steps between consecutive frames for smoother motion
+    (count * interp frames total). Returns a list of NSImage."""
     pil = Image.open(path).convert("RGBA")
     pil = _remove_white_bg(pil)
     w, h = pil.size
     fw = w // count
-    frames = []
+
+    base = []
     for i in range(count):
         frame = pil.crop((i * fw, 0, (i + 1) * fw, h))
         if flip:
             frame = frame.transpose(Image.FLIP_LEFT_RIGHT)
-        frames.append(_pil_to_nsimage(frame))
-    return frames
+        base.append(frame)
+
+    if interp <= 1:
+        out = base
+    else:
+        out = []
+        for i in range(count):
+            a, b = base[i], base[(i + 1) % count]
+            for s in range(interp):
+                t = s / interp
+                out.append(a if s == 0 else Image.blend(a, b, t))
+    return [_pil_to_nsimage(f) for f in out]
 
 
 # ---- Views -----------------------------------------------------------------
@@ -191,6 +205,7 @@ class Pet:
         path = os.path.join(SPRITE_DIR, spec["sheet"])
         self.frames_left = load_frames(path)
         self.frames_right = load_frames(path, flip=True)
+        self.nframes = len(self.frames_left)
 
         self.x = self.y = self.base_y = 0.0
         self.direction = -1
@@ -264,7 +279,7 @@ class Pet:
         if self.paused and self.kind == "walk":
             self.anim_idx = 0
         else:
-            self.anim_idx = ((ticks + self.offset) // self.anim) % 4
+            self.anim_idx = ((ticks + self.offset) // self.anim) % self.nframes
 
         if self.bubble_hide is not None and ticks >= self.bubble_hide:
             self.hide_bubble()

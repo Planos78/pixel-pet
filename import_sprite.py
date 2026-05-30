@@ -2,17 +2,19 @@
 
     python3.11 import_sprite.py <name> <image_path> [--keep-bg]
 
-Steps:
-  1. flood-fill the white background to transparent from the image edges
-     (interior whites like eye highlights are preserved)
-  2. resize to exactly 512x128 (4 frames of 128x128)
-  3. save to sprite_sheet/<name>.png
+The AI usually returns a wide image (e.g. ~1792x896) of 4 frames. Naively
+resizing that to 512x128 squashes tall characters. Instead this:
+  1. flood-fills the white background to transparent from the edges
+     (interior whites like belly/eye highlights are preserved)
+  2. splits the image into 4 equal columns (the 4 frames)
+  3. trims each frame to its content, scales it to fit a 128x128 cell while
+     PRESERVING aspect ratio, and bottom-aligns it (feet on the ground)
+  4. assembles a clean 512x128 sheet -> sprite_sheet/<name>.png
 
-<name> is the creature key used in pet.py's PETS list, e.g.
-    cat  persian  corgi  pikachu  totoro
-(or any new name you add there).
+<name> is the creature key in pet.py's PETS list:
+    cat  persian  corgi  pikachu  totoro   (or any new name you add)
 
-    python3.11 import_sprite.py pikachu ~/Downloads/pikachu_sheet.png
+    python3.11 import_sprite.py totoro ~/Downloads/totoro.png
 """
 
 import os
@@ -20,6 +22,10 @@ import sys
 from collections import deque
 
 from PIL import Image
+
+FRAMES = 4
+CELL = 128
+MARGIN = 6          # transparent padding inside each cell (px)
 
 
 def remove_white_bg(img, thresh=236):
@@ -52,6 +58,29 @@ def remove_white_bg(img, thresh=236):
     return img
 
 
+def conform(src):
+    """Split into 4 frames, trim + aspect-fit + bottom-align each into a cell."""
+    w, h = src.size
+    fw = w // FRAMES
+    out = Image.new("RGBA", (CELL * FRAMES, CELL), (0, 0, 0, 0))
+    for i in range(FRAMES):
+        x0 = i * fw
+        x1 = w if i == FRAMES - 1 else (i + 1) * fw
+        col = src.crop((x0, 0, x1, h))
+        bbox = col.getbbox()
+        if bbox:
+            col = col.crop(bbox)
+        cw, ch = col.size
+        avail = CELL - 2 * MARGIN
+        scale = min(avail / cw, avail / ch)
+        nw, nh = max(1, round(cw * scale)), max(1, round(ch * scale))
+        col = col.resize((nw, nh), Image.LANCZOS)
+        x = i * CELL + (CELL - nw) // 2          # center horizontally
+        y = CELL - MARGIN - nh                   # bottom-align (feet on ground)
+        out.alpha_composite(col, (x, y))
+    return out
+
+
 def main():
     flags = [a for a in sys.argv[1:] if a.startswith("--")]
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -65,13 +94,14 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     img = Image.open(path).convert("RGBA")
-    if "--keep-bg" not in flags:
-        img = remove_white_bg(img)
-    img = img.resize((512, 128), Image.LANCZOS)
+    if "--keep-bg" in flags:
+        sheet = img.resize((CELL * FRAMES, CELL), Image.LANCZOS)
+    else:
+        sheet = conform(remove_white_bg(img))
 
     out = os.path.join(out_dir, name + ".png")
-    img.save(out)
-    print("wrote", out, img.size)
+    sheet.save(out)
+    print("wrote", out, sheet.size)
 
 
 if __name__ == "__main__":

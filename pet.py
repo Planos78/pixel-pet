@@ -61,8 +61,8 @@ PETS = [
     {"name": "pikachu", "sheet": "pikachu.png", "kind": "walk", "size": 88,
      "speed": 2.2, "anim": 6,
      "msgs": ["pika!", "pika pika!", "pikachuuu", "zzzap ⚡"]},
-    {"name": "totoro", "sheet": "totoro.png", "kind": "fly", "size": 120,
-     "speed": 1.2, "anim": 10,
+    {"name": "totoro", "sheet": "totoro.png", "kind": "walk", "size": 120,
+     "speed": 1.3, "anim": 9,
      "msgs": ["totoro~", "*rumble*", "...", "🌳"]},
 ]
 

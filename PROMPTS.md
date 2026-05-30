@@ -91,20 +91,21 @@ Animation: 4-frame walk cycle, legs alternate each frame; Pikachu same size and
 vertical position in every frame; feet on the bottom edge; only legs and tail move.
 ```
 
-## 🌳 totoro (float / fly, front view)
+## 🌳 totoro (walk, facing left)
 ```
-Create a pixel art sprite sheet of Totoro (My Neighbor Totoro) gently floating,
-front view. Output: single PNG, exactly 512x128 pixels, 4 frames side by side,
-each 128x128. No title, no border, no labels, no grid lines.
+Create a pixel art sprite sheet of Totoro (My Neighbor Totoro) WALKING,
+side view facing LEFT. Output: single PNG, exactly 512x128 pixels, 4 frames
+side by side, each 128x128. No title, no border, no labels, no grid lines.
 Background: pure flat white #FFFFFF.
 Style: clean pixel art, bold dark outline, flat colors, hard pixel edges,
 no anti-aliasing, no gradients, no shadows.
-Character: large round gray-blue body #8A929E, a cream-white belly with small gray
-chevron (V) markings, two SMALL pointed ears on top of the head, two small round
-black eyes spaced apart, a small triangular nose, thin short whiskers, tiny arms
-held out to the sides.
-Animation: 4-frame gentle floating loop; the whole body bobs up and down a little
-and the ears/arms move slightly; same size, centered in each frame.
+Character: large round gray-blue body #8A929E, a cream-white belly with small
+gray chevron (V) markings, two small pointed ears on top of the head, one round
+black eye with a tiny white highlight, a small triangular nose, short whiskers,
+short stubby legs with small feet.
+Animation: 4-frame walk cycle, the stubby legs alternate each frame; Totoro
+same size and vertical position in every frame; feet rest on the bottom edge;
+body waddles slightly.
 ```
 
 ---

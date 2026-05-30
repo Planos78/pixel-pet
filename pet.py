@@ -41,7 +41,8 @@ BUBBLE_DURATION = 3       # seconds a speech bubble stays up
 BUBBLE_EVERY = 8          # default seconds between idle speech bubbles
 FLY_AMP = 40.0            # vertical bob amplitude for flyers (px)
 FLY_FREQ = 0.05           # bob speed (radians per tick)
-INTERP = 4                # cross-fade sub-steps between base frames (4*4=16)
+INTERP = 1                # cross-fade sub-steps between base frames (1 = off,
+                          # crisp 4-frame; 4 = 16 interpolated frames but blurry)
 
 LOCK_PATH = "/tmp/pixel_pet.lock"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,16 +52,16 @@ SPRITE_DIR = os.path.join(BASE_DIR, "sprite_sheet")
 # animation tick (lower = faster), and its own speech lines.
 PETS = [
     {"name": "cat", "sheet": "cat.png", "kind": "walk", "size": 86,
-     "speed": 2.0, "anim": 2,
+     "speed": 2.0, "anim": 6,
      "msgs": ["~meow meow", "nya~", "zoomies!!", "where my fish"]},
     {"name": "persian", "sheet": "persian.png", "kind": "walk", "size": 86,
-     "speed": 1.5, "anim": 2,
+     "speed": 1.5, "anim": 7,
      "msgs": ["mrrp~", "so fluffy", "pet me?", "(=^･ω･^=)"]},
     {"name": "corgi", "sheet": "corgi.png", "kind": "walk", "size": 92,
-     "speed": 2.6, "anim": 2,
+     "speed": 2.6, "anim": 6,
      "msgs": ["woof!", "borf borf", "such speed", "wiggle~"]},
     {"name": "totoro", "sheet": "totoro.png", "kind": "walk", "size": 120,
-     "speed": 1.3, "anim": 3,
+     "speed": 1.3, "anim": 9,
      "msgs": ["totoro~", "*rumble*", "...", "🌳"]},
 ]
 

@@ -59,25 +59,37 @@ def remove_white_bg(img, thresh=236):
 
 
 def conform(src):
-    """Split into 4 frames, trim + aspect-fit + bottom-align each into a cell."""
+    """Split into 4 frames and fit them into 512x128.
+
+    All four frames share ONE crop window (the union of their content boxes)
+    and ONE scale, so the character keeps a constant size and position — only
+    legs/tail animate. (Per-frame trimming made fluffy tails change the box
+    each frame, which scaled the body differently and looked like flicker.)
+    """
     w, h = src.size
     fw = w // FRAMES
+    cols = [src.crop((i * fw, 0, (w if i == FRAMES - 1 else (i + 1) * fw), h))
+            for i in range(FRAMES)]
+
+    boxes = [b for b in (c.getbbox() for c in cols) if b]
+    if not boxes:
+        return src.resize((CELL * FRAMES, CELL), Image.LANCZOS)
+    x0 = min(b[0] for b in boxes)
+    y0 = min(b[1] for b in boxes)
+    x1 = max(b[2] for b in boxes)
+    y1 = max(b[3] for b in boxes)
+
+    cw, ch = x1 - x0, y1 - y0
+    avail = CELL - 2 * MARGIN
+    scale = min(avail / cw, avail / ch)
+    nw, nh = max(1, round(cw * scale)), max(1, round(ch * scale))
+    x_in_cell = (CELL - nw) // 2
+    y_in_cell = CELL - MARGIN - nh               # bottom-align (feet on ground)
+
     out = Image.new("RGBA", (CELL * FRAMES, CELL), (0, 0, 0, 0))
-    for i in range(FRAMES):
-        x0 = i * fw
-        x1 = w if i == FRAMES - 1 else (i + 1) * fw
-        col = src.crop((x0, 0, x1, h))
-        bbox = col.getbbox()
-        if bbox:
-            col = col.crop(bbox)
-        cw, ch = col.size
-        avail = CELL - 2 * MARGIN
-        scale = min(avail / cw, avail / ch)
-        nw, nh = max(1, round(cw * scale)), max(1, round(ch * scale))
-        col = col.resize((nw, nh), Image.LANCZOS)
-        x = i * CELL + (CELL - nw) // 2          # center horizontally
-        y = CELL - MARGIN - nh                   # bottom-align (feet on ground)
-        out.alpha_composite(col, (x, y))
+    for i, col in enumerate(cols):
+        frame = col.crop((x0, y0, x1, y1)).resize((nw, nh), Image.LANCZOS)
+        out.alpha_composite(frame, (i * CELL + x_in_cell, y_in_cell))
     return out
 
 

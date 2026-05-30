@@ -13,7 +13,6 @@ DATA_FILES = [
         "sprite_sheet/cat.png",
         "sprite_sheet/persian.png",
         "sprite_sheet/corgi.png",
-        "sprite_sheet/pikachu.png",
         "sprite_sheet/totoro.png",
     ]),
 ]

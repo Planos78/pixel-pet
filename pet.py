@@ -1,14 +1,19 @@
-"""Pixel Pet — a macOS desktop pet (PyObjC/Cocoa + Pillow).
+"""Pixel Pet — a macOS desktop menagerie (PyObjC/Cocoa + Pillow).
 
-A pixel-art cat walks across the bottom of the screen on top of all windows
-with true per-pixel transparency. Left-click to make it sit, drag to move it,
-right-click for a Quit menu. Speech bubbles pop above it.
+Several pixel-art creatures roam the screen on top of all windows with true
+per-pixel transparency. Walkers (cat, persian cat, corgi, pikachu) pad along
+the bottom; flyers (totoro) drift and bob across the upper screen.
+
+  - Left click a creature → it pauses for a moment and says something
+  - Drag    → move it anywhere
+  - Right click → menu with "Quit Pixel Pet" (quits the whole menagerie)
 
     python3.11 pet.py        # run from source
 """
 
 import os
 import sys
+import math
 import signal
 import random
 import fcntl
@@ -29,25 +34,37 @@ from AppKit import (
 )
 
 # ---- Constants -------------------------------------------------------------
-SIZE = 80                 # on-screen cat size (px)
 FPS = 30                  # animation/movement ticks per second
-ANIM_TICK_WALK = 6        # advance walk frame every N ticks
-ANIM_TICK_SIT = 15        # advance sit frame every N ticks
-WALK_SPEED = 2.0          # px moved per tick while walking
 WINDOW_LEVEL = 25         # above apps, below system UI
-SIT_DURATION = 3          # seconds the cat sits after a click
+PAUSE_DURATION = 3        # seconds a creature pauses after a click
 BUBBLE_DURATION = 3       # seconds a speech bubble stays up
-WALK_BUBBLE_EVERY = 8     # seconds between walking speech bubbles
-
-SIT_MSGS = ["~meow meow", "purrr...", "nya~", "(˘ω˘)"]
-WALK_MSGS = ["where my fish nya", "i am speed ~", "*sniff sniff*", "zoomies!!"]
+BUBBLE_EVERY = 8          # default seconds between idle speech bubbles
+FLY_AMP = 40.0            # vertical bob amplitude for flyers (px)
+FLY_FREQ = 0.05           # bob speed (radians per tick)
 
 LOCK_PATH = "/tmp/pixel_pet.lock"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SPRITE_DIR = os.path.join(BASE_DIR, "sprite_sheet")
 
-STATE_WALK = "walk"
-STATE_SIT = "sit"
+# Each creature: sprite sheet (4 frames, facing left), behaviour, size, speed,
+# animation tick (lower = faster), and its own speech lines.
+PETS = [
+    {"name": "cat", "sheet": "cat.png", "kind": "walk", "size": 86,
+     "speed": 2.0, "anim": 6,
+     "msgs": ["~meow meow", "nya~", "zoomies!!", "where my fish"]},
+    {"name": "persian", "sheet": "persian.png", "kind": "walk", "size": 86,
+     "speed": 1.5, "anim": 7,
+     "msgs": ["mrrp~", "so fluffy", "pet me?", "(=^･ω･^=)"]},
+    {"name": "corgi", "sheet": "corgi.png", "kind": "walk", "size": 92,
+     "speed": 2.6, "anim": 6,
+     "msgs": ["woof!", "borf borf", "such speed", "wiggle~"]},
+    {"name": "pikachu", "sheet": "pikachu.png", "kind": "walk", "size": 88,
+     "speed": 2.2, "anim": 6,
+     "msgs": ["pika!", "pika pika!", "pikachuuu", "zzzap ⚡"]},
+    {"name": "totoro", "sheet": "totoro.png", "kind": "fly", "size": 120,
+     "speed": 1.2, "anim": 10,
+     "msgs": ["totoro~", "*rumble*", "...", "🌳"]},
+]
 
 
 # ---- Sprite loading --------------------------------------------------------
@@ -88,13 +105,13 @@ def load_frames(path, count=4, flip=False):
 
 
 # ---- Views -----------------------------------------------------------------
-class CatView(NSView):
-    """Draws the current cat frame; forwards mouse events to the controller."""
+class PetView(NSView):
+    """Draws one creature's current frame; forwards mouse events to its Pet."""
 
     def drawRect_(self, rect):
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(self.bounds())
-        img = self.controller.currentCatImage()
+        img = self.pet.current_image()
         if img is not None:
             NSGraphicsContext.currentContext().setImageInterpolation_(
                 NSImageInterpolationNone)
@@ -103,16 +120,16 @@ class CatView(NSView):
                 NSCompositingOperationSourceOver, 1.0)
 
     def mouseDown_(self, event):
-        self.controller.catMouseDown_(event)
+        self.pet.on_down(event)
 
     def mouseDragged_(self, event):
-        self.controller.catMouseDragged_(event)
+        self.pet.on_drag(event)
 
     def mouseUp_(self, event):
-        self.controller.catMouseUp_(event)
+        self.pet.on_up(event)
 
     def rightMouseDown_(self, event):
-        self.controller.catRightMouseDown_(event)
+        self.pet.on_right(event)
 
 
 class BubbleView(NSView):
@@ -159,46 +176,202 @@ class BubbleView(NSView):
         text.drawAtPoint_withAttributes_(NSMakePoint(tx, ty), attrs)
 
 
+# ---- Pet (one creature) ----------------------------------------------------
+class Pet:
+    """State + windows + behaviour for a single creature. Plain Python class
+    (not an ObjC subclass), so method names are unconstrained."""
+
+    def __init__(self, controller, spec):
+        self.c = controller
+        self.name = spec["name"]
+        self.kind = spec["kind"]
+        self.size = spec["size"]
+        self.speed = spec["speed"]
+        self.anim = spec["anim"]
+        self.msgs = spec["msgs"]
+        self.bubble_every = spec.get("bubble_every", BUBBLE_EVERY)
+
+        path = os.path.join(SPRITE_DIR, spec["sheet"])
+        self.frames_left = load_frames(path)
+        self.frames_right = load_frames(path, flip=True)
+
+        self.x = self.y = self.base_y = 0.0
+        self.direction = -1
+        self.offset = 0
+        self.anim_idx = 0
+        self.paused = False
+        self.pause_start = 0
+        self.dragging = False
+        self.drag_moved = False
+        self.drag_offset = NSMakePoint(0, 0)
+        self.next_bubble = FPS * self.bubble_every
+        self.bubble_visible = False
+        self.bubble_hide = None
+        self.bubble_w = self.bubble_h = 0.0
+
+    def x_bounds(self):
+        lo = self.c.vf.origin.x
+        return lo, lo + self.c.vf.size.width - self.size
+
+    def build(self, x, y, direction, offset):
+        self.x = float(x)
+        self.y = self.base_y = float(y)
+        self.direction = direction
+        self.offset = offset
+        self.next_bubble = FPS * self.bubble_every + offset
+
+        self.window = self.c._make_window(
+            NSMakeRect(self.x, self.y, self.size, self.size), True)
+        self.view = PetView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, self.size, self.size))
+        self.view.pet = self
+        self.window.setContentView_(self.view)
+        self.window.orderFrontRegardless()
+
+        self.bubble_window = self.c._make_window(NSMakeRect(0, 0, 10, 10), False)
+        self.bubble_view = BubbleView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        self.bubble_view.text = ""
+        self.bubble_window.setContentView_(self.bubble_view)
+        self.reposition()
+
+    def current_image(self):
+        frames = self.frames_left if self.direction == -1 else self.frames_right
+        return frames[self.anim_idx]
+
+    def _bob(self, ticks):
+        self.y = self.base_y + FLY_AMP * math.sin((ticks + self.offset) * FLY_FREQ)
+
+    def update(self, ticks):
+        lo, hi = self.x_bounds()
+        if self.dragging:
+            pass
+        elif self.paused:
+            if ticks - self.pause_start >= FPS * PAUSE_DURATION:
+                self.paused = False
+            if self.kind == "fly":
+                self._bob(ticks)
+        else:
+            self.x += self.direction * self.speed
+            if self.x <= lo:
+                self.x = float(lo)
+                self.direction = 1
+            elif self.x >= hi:
+                self.x = float(hi)
+                self.direction = -1
+            if self.kind == "fly":
+                self._bob(ticks)
+            if ticks >= self.next_bubble:
+                self.show_bubble(random.choice(self.msgs), ticks)
+                self.next_bubble = ticks + FPS * self.bubble_every
+
+        if self.paused and self.kind == "walk":
+            self.anim_idx = 0
+        else:
+            self.anim_idx = ((ticks + self.offset) // self.anim) % 4
+
+        if self.bubble_hide is not None and ticks >= self.bubble_hide:
+            self.hide_bubble()
+
+        self.reposition()
+        self.view.setNeedsDisplay_(True)
+
+    def reposition(self):
+        self.window.setFrameOrigin_(NSMakePoint(int(self.x), int(self.y)))
+        if self.bubble_visible:
+            self._reposition_bubble()
+
+    def _reposition_bubble(self):
+        bx = self.x + self.size / 2.0 - self.bubble_w / 2.0
+        by = self.y + self.size - 6
+        self.bubble_window.setFrame_display_(
+            NSMakeRect(bx, by, self.bubble_w, self.bubble_h), True)
+
+    def show_bubble(self, text, ticks):
+        attrs = {
+            NSFontAttributeName: NSFont.systemFontOfSize_(13),
+            NSForegroundColorAttributeName: NSColor.blackColor(),
+        }
+        size = NSString.stringWithString_(text).sizeWithAttributes_(attrs)
+        self.bubble_w = size.width + 18
+        self.bubble_h = size.height + 22
+        self.bubble_view.text = text
+        self.bubble_visible = True
+        self.bubble_hide = ticks + FPS * BUBBLE_DURATION
+        self._reposition_bubble()
+        self.bubble_view.setNeedsDisplay_(True)
+        self.bubble_window.orderFrontRegardless()
+
+    def hide_bubble(self):
+        self.bubble_visible = False
+        self.bubble_hide = None
+        self.bubble_window.orderOut_(None)
+
+    # -- mouse (called from PetView) --
+    def on_down(self, event):
+        self.dragging = True
+        self.drag_moved = False
+        self.drag_offset = event.locationInWindow()
+
+    def on_drag(self, event):
+        self.drag_moved = True
+        mouse = NSEvent.mouseLocation()
+        self.x = mouse.x - self.drag_offset.x
+        self.y = self.base_y = mouse.y - self.drag_offset.y
+        self.reposition()
+
+    def on_up(self, event):
+        moved = self.drag_moved
+        self.dragging = False
+        self.drag_moved = False
+        if not moved:
+            self.paused = True
+            self.pause_start = self.c.ticks
+            self.show_bubble(random.choice(self.msgs), self.c.ticks)
+
+    def on_right(self, event):
+        menu = NSMenu.alloc().init()
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit Pixel Pet", "quit:", "")
+        item.setTarget_(self.c)
+        menu.addItem_(item)
+        NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self.view)
+
+    def hide_windows(self):
+        self.bubble_window.orderOut_(None)
+        self.window.orderOut_(None)
+
+
 # ---- Controller ------------------------------------------------------------
 class PetController(NSObject):
 
     def setup(self):
         self._acquire_lock()
-
-        vf = NSScreen.mainScreen().visibleFrame()
-        self.min_x = vf.origin.x
-        self.max_x = vf.origin.x + vf.size.width - SIZE
-        self.cat_y = vf.origin.y
-        self.cat_x = float(self.max_x)
-
-        self.state = STATE_WALK
-        self.direction = -1            # -1 = facing/moving left, +1 = right
         self.ticks = 0
-        self.sit_start = 0
-        self.is_dragging = False
-        self.drag_moved = False
-        self.drag_offset = NSMakePoint(0, 0)
-        self.next_walk_bubble = FPS * WALK_BUBBLE_EVERY
-        self.bubble_visible = False
-        self.bubble_hide_tick = None
-        self.bubble_w = 0.0
-        self.bubble_h = 0.0
         self.should_quit = False
+        self.vf = NSScreen.mainScreen().visibleFrame()
+        self.pets = []
 
-        # sprites
-        self.walk_left = load_frames(os.path.join(SPRITE_DIR, "walk_sprite.png"))
-        self.walk_right = load_frames(os.path.join(SPRITE_DIR, "walk_sprite.png"),
-                                      flip=True)
-        self.sit_frames = load_frames(os.path.join(SPRITE_DIR, "sit_sprite.png"))
-
-        self._build_cat_window()
-        self._build_bubble_window()
-        self._reposition_cat()
+        walkers = [s for s in PETS if s["kind"] == "walk"]
+        nwalk = max(1, len(walkers))
+        wi = 0
+        for idx, spec in enumerate(PETS):
+            pet = Pet(self, spec)
+            if spec["kind"] == "walk":
+                slot = (wi + 0.5) / nwalk
+                x = self.vf.origin.x + slot * self.vf.size.width - pet.size / 2.0
+                y = self.vf.origin.y
+                direction = -1 if wi % 2 == 0 else 1
+                wi += 1
+            else:
+                x = self.vf.origin.x + self.vf.size.width * 0.6
+                y = self.vf.origin.y + self.vf.size.height * 0.5
+                direction = -1
+            pet.build(x, y, direction, offset=idx * 17)
+            self.pets.append(pet)
 
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             1.0 / FPS, self, "tick:", None, True)
 
-    # -- window construction --
     def _make_window(self, rect, accepts_mouse):
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
@@ -212,125 +385,13 @@ class PetController(NSObject):
             NSWindowCollectionBehaviorStationary)
         return win
 
-    def _build_cat_window(self):
-        rect = NSMakeRect(self.cat_x, self.cat_y, SIZE, SIZE)
-        self.cat_window = self._make_window(rect, accepts_mouse=True)
-        self.cat_view = CatView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, SIZE, SIZE))
-        self.cat_view.controller = self
-        self.cat_window.setContentView_(self.cat_view)
-        self.cat_window.orderFrontRegardless()
-
-    def _build_bubble_window(self):
-        self.bubble_window = self._make_window(
-            NSMakeRect(0, 0, 10, 10), accepts_mouse=False)
-        self.bubble_view = BubbleView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, 10, 10))
-        self.bubble_view.text = ""
-        self.bubble_window.setContentView_(self.bubble_view)
-
-    # -- drawing source --
-    def currentCatImage(self):
-        if self.state == STATE_SIT:
-            return self.sit_frames[(self.ticks // ANIM_TICK_SIT) % 4]
-        frames = self.walk_left if self.direction == -1 else self.walk_right
-        return frames[(self.ticks // ANIM_TICK_WALK) % 4]
-
-    # -- main loop --
     def tick_(self, timer):
         if self.should_quit:
             self.cleanupAndQuit()
             return
-
         self.ticks += 1
-
-        if self.state == STATE_WALK and not self.is_dragging:
-            self.cat_x += self.direction * WALK_SPEED
-            if self.cat_x <= self.min_x:
-                self.cat_x = float(self.min_x)
-                self.direction = 1
-            elif self.cat_x >= self.max_x:
-                self.cat_x = float(self.max_x)
-                self.direction = -1
-            if self.ticks >= self.next_walk_bubble:
-                self.showBubble_for_(random.choice(WALK_MSGS),
-                                     FPS * BUBBLE_DURATION)
-                self.next_walk_bubble = self.ticks + FPS * WALK_BUBBLE_EVERY
-
-        elif self.state == STATE_SIT:
-            if self.ticks - self.sit_start >= FPS * SIT_DURATION:
-                self.state = STATE_WALK
-
-        if self.bubble_hide_tick is not None and self.ticks >= self.bubble_hide_tick:
-            self.hideBubble()
-
-        self._reposition_cat()
-        self.cat_view.setNeedsDisplay_(True)
-
-    def _reposition_cat(self):
-        self.cat_window.setFrameOrigin_(NSMakePoint(int(self.cat_x), int(self.cat_y)))
-        if self.bubble_visible:
-            self._reposition_bubble()
-
-    def _reposition_bubble(self):
-        bx = self.cat_x + SIZE / 2.0 - self.bubble_w / 2.0
-        by = self.cat_y + SIZE - 6
-        self.bubble_window.setFrame_display_(
-            NSMakeRect(bx, by, self.bubble_w, self.bubble_h), True)
-
-    # -- speech bubbles --
-    def showBubble_for_(self, text, ticks):
-        attrs = {
-            NSFontAttributeName: NSFont.systemFontOfSize_(13),
-            NSForegroundColorAttributeName: NSColor.blackColor(),
-        }
-        size = NSString.stringWithString_(text).sizeWithAttributes_(attrs)
-        self.bubble_w = size.width + 18
-        self.bubble_h = size.height + 22
-        self.bubble_view.text = text
-        self.bubble_visible = True
-        self.bubble_hide_tick = self.ticks + ticks
-        self._reposition_bubble()
-        self.bubble_view.setNeedsDisplay_(True)
-        self.bubble_window.orderFrontRegardless()
-
-    def hideBubble(self):
-        self.bubble_visible = False
-        self.bubble_hide_tick = None
-        self.bubble_window.orderOut_(None)
-
-    # -- mouse --
-    def catMouseDown_(self, event):
-        self.is_dragging = True
-        self.drag_moved = False
-        self.drag_offset = event.locationInWindow()
-
-    def catMouseDragged_(self, event):
-        self.drag_moved = True
-        mouse = NSEvent.mouseLocation()
-        self.cat_x = mouse.x - self.drag_offset.x
-        self.cat_y = mouse.y - self.drag_offset.y
-        self._reposition_cat()
-
-    def catMouseUp_(self, event):
-        was_drag = self.drag_moved
-        self.is_dragging = False
-        self.drag_moved = False
-        if not was_drag:
-            self.startSit()
-
-    def startSit(self):
-        self.state = STATE_SIT
-        self.sit_start = self.ticks
-        self.showBubble_for_(random.choice(SIT_MSGS), FPS * SIT_DURATION)
-
-    def catRightMouseDown_(self, event):
-        menu = NSMenu.alloc().init()
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Quit Pixel Pet", "quit:", "")
-        item.setTarget_(self)
-        menu.addItem_(item)
-        NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self.cat_view)
+        for pet in self.pets:
+            pet.update(self.ticks)
 
     def quit_(self, sender):
         self.cleanupAndQuit()
@@ -360,8 +421,8 @@ class PetController(NSObject):
     def cleanupAndQuit(self):
         if getattr(self, "timer", None) is not None:
             self.timer.invalidate()
-        self.bubble_window.orderOut_(None)
-        self.cat_window.orderOut_(None)
+        for pet in getattr(self, "pets", []):
+            pet.hide_windows()
         self._release_lock()
         NSApplication.sharedApplication().terminate_(None)
 
